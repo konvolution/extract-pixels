@@ -2,6 +2,13 @@ import * as React from "react";
 import { useState } from "react";
 import "./styles.css";
 
+import {
+  GridRenderer,
+  renderGrid as renderGridWebGL
+} from "./GridRenderer/webGLRenderer";
+import { renderGrid } from "./GridRenderer/canvas2DRenderer";
+import { Coord, GridParams } from "./GridRenderer/rendererTypes";
+
 /**
  *
  * @param accept Comma-delimited list of mime types or extensions
@@ -74,11 +81,15 @@ export default function App() {
   });
 
   const [imageScale, setImageScale] = React.useState(2);
-  const [gridOffset, setGridOffset] = React.useState([0, 0]);
-  const [gridSize, setGridSize] = React.useState([8, 8]);
-  const [gridMaxPixelsRaw, setGridMaxPixelsRaw] = React.useState([500, 500]);
+  const [gridOffset, setGridOffset] = React.useState<Coord>([0, 0]);
+  const [gridSize, setGridSize] = React.useState<Coord>([8, 8]);
+  const [gridMaxPixelsRaw, setGridMaxPixelsRaw] = React.useState<Coord>([
+    500,
+    500
+  ]);
+  const [webGLGrid, setWebGLGrid] = React.useState(false);
 
-  const gridMaxPixels = React.useMemo(
+  const gridMaxPixels = React.useMemo<Coord>(
     () => [
       isNaN(gridMaxPixelsRaw[0]) ? 1 : gridMaxPixelsRaw[0],
       isNaN(gridMaxPixelsRaw[1]) ? 1 : gridMaxPixelsRaw[1]
@@ -86,11 +97,14 @@ export default function App() {
     [gridMaxPixelsRaw]
   );
 
-  const [gridCanvasSize, setGridCanvasSize] = React.useState([0, 0]);
+  const [gridCanvasSize, setGridCanvasSize] = React.useState<Coord>([0, 0]);
   const [imageIteration, setImageIteration] = React.useState(0);
 
   const refImageCanvas = React.useRef<HTMLCanvasElement>(null);
   const refGridCanvas = React.useRef<HTMLCanvasElement>(null);
+  const refWebGLGridRenderer = React.useRef<GridRenderer | undefined>(
+    undefined
+  );
 
   const onChangeScale = React.useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -277,74 +291,36 @@ export default function App() {
       return;
     }
 
-    gridCanvas.width = gridCanvasSize[0] * imageScale;
-    gridCanvas.height = gridCanvasSize[1] * imageScale;
+    const gridParams: GridParams = {
+      canvasSize: gridCanvasSize,
+      maxCells: gridMaxPixels,
+      cellSize: gridSize,
+      gridOffset,
+      renderScale: imageScale
+    };
 
-    const ctx = gridCanvas.getContext("2d");
-    if (!ctx) {
-      // This shouldn't happen
-      return;
+    if (webGLGrid) {
+      let gridRenderer = refWebGLGridRenderer.current;
+
+      // Create a new grid renderer if we don't have a grid renderer, or if
+      // the canvas changed
+      if (!gridRenderer || gridRenderer.gridCanvas() !== gridCanvas) {
+        gridRenderer = new GridRenderer(gridCanvas);
+        refWebGLGridRenderer.current = gridRenderer;
+      }
+
+      gridRenderer.render(gridParams);
+    } else {
+      renderGrid(gridCanvas, gridParams);
     }
-
-    ctx.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
-    ctx.lineWidth = 1;
-
-    const gridPixels = [
-      Math.min(
-        gridMaxPixels[0],
-        Math.floor((gridCanvasSize[0] - gridOffset[0]) / gridSize[0])
-      ),
-      Math.min(
-        gridMaxPixels[1],
-        Math.floor((gridCanvasSize[1] - gridOffset[1]) / gridSize[1])
-      )
-    ];
-
-    const gridEnd = [
-      gridOffset[0] + gridSize[0] * gridPixels[0],
-      gridOffset[1] + gridSize[1] * gridPixels[1]
-    ];
-
-    ctx.beginPath();
-
-    for (
-      let x = imageScale * gridOffset[0], ix = 0;
-      x < gridCanvas.width && ix <= gridPixels[0];
-      x += imageScale * gridSize[0], ++ix
-    ) {
-      ctx.moveTo(x + 0.5, imageScale * gridOffset[1]);
-      ctx.lineTo(x + 0.5, imageScale * gridEnd[1]);
-    }
-
-    for (
-      let y = imageScale * gridOffset[1], iy = 0;
-      y < gridCanvas.height && iy <= gridPixels[1];
-      y += imageScale * gridSize[1], ++iy
-    ) {
-      ctx.moveTo(imageScale * gridOffset[0], y + 0.5);
-      ctx.lineTo(imageScale * gridEnd[0], y + 0.5);
-    }
-
-    ctx.strokeStyle = "black";
-    ctx.stroke();
-
-    ctx.strokeStyle = "white";
-    ctx.setLineDash([1, 1]);
-    ctx.stroke();
-
-    ctx.beginPath();
-    const x = imageScale * gridOffset[0];
-    ctx.moveTo(x + 0.5, imageScale * gridOffset[1]);
-    ctx.lineTo(x + 0.5, imageScale * gridEnd[1]);
-
-    const y = imageScale * gridOffset[1];
-    ctx.moveTo(imageScale * gridOffset[0], y + 0.5);
-    ctx.lineTo(imageScale * gridEnd[0], y + 0.5);
-
-    ctx.strokeStyle = "cyan";
-    ctx.setLineDash([1, 1]);
-    ctx.stroke();
-  }, [gridOffset, gridSize, gridMaxPixels, gridCanvasSize, imageScale]);
+  }, [
+    webGLGrid,
+    gridOffset,
+    gridSize,
+    gridMaxPixels,
+    gridCanvasSize,
+    imageScale
+  ]);
 
   const refExtractedImage = React.useRef<HTMLCanvasElement>(null);
 
@@ -460,6 +436,10 @@ export default function App() {
     );
   }, []);
 
+  const toggleWebGLGrid = React.useCallback(() => {
+    setWebGLGrid((value) => !value);
+  }, []);
+
   return (
     <div className="App">
       <button onClick={onBrowse}>Choose image ...</button>
@@ -503,6 +483,14 @@ export default function App() {
               </div>
             </div>
           </div>
+          <label>
+            <input
+              type="checkbox"
+              checked={webGLGrid}
+              onChange={toggleWebGLGrid}
+            />
+            WebGL grid
+          </label>
         </div>
         <div className="ExtractedImageHolder">
           <div className="ExtractedImagePlaceholder">
@@ -526,7 +514,11 @@ export default function App() {
         )}
 
         {/* Grid overlay */}
-        <canvas ref={refGridCanvas} className="ImageCanvas" />
+        <canvas
+          key={webGLGrid ? "WebGLGrid" : "Canvas2DGrid"}
+          ref={refGridCanvas}
+          className="ImageCanvas"
+        />
       </div>
     </div>
   );
